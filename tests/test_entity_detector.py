@@ -733,12 +733,7 @@ def test_zh_tw_falls_back_to_english_for_non_cjk_names():
 
 def test_zh_cn_candidate_extraction():
     """Simplified-Chinese name extraction mirrors zh-TW behaviour."""
-    text = (
-        "张三 今天主持。\n"
-        "- 张三 跟 Bob 谈。\n"
-        "张三: 已经搞定了。\n"
-        "张三, 明天继续。\n"
-    )
+    text = "张三 今天主持。\n- 张三 跟 Bob 谈。\n张三: 已经搞定了。\n张三, 明天继续。\n"
     result = extract_candidates(text, languages=("zh-CN",))
     assert "张三" in result, f"expected 张三 in {result}"
     assert result["张三"] >= 3
@@ -747,10 +742,7 @@ def test_zh_cn_candidate_extraction():
 def test_zh_cn_and_zh_tw_union_covers_both_variants():
     """Passing both zh-CN and zh-TW unions the surname sets — a document
     mixing simplified 张三 and traditional 張三 extracts both."""
-    text = (
-        "张三 说 hello。张三 笑了。张三 同意。\n"
-        "張三 也參加。張三 寫 code。張三 決定。\n"
-    )
+    text = "张三 说 hello。张三 笑了。张三 同意。\n張三 也參加。張三 寫 code。張三 決定。\n"
     result = extract_candidates(text, languages=("zh-TW", "zh-CN"))
     # At least one variant meets freq>=3
     assert "张三" in result or "張三" in result
