@@ -340,7 +340,7 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
     # `_hybrid_rank`; do the same here so CLI results match what agents
     # see via `mempalace_search`.
     hits = [
-        {"text": doc, "distance": float(dist), "metadata": meta or {}}
+        {"text": doc or "", "distance": float(dist), "metadata": meta or {}}
         for doc, meta, dist in zip(docs, metas, dists)
     ]
     hits = _hybrid_rank(hits, query)
@@ -809,6 +809,8 @@ def search_memories(
         _first_or_empty(drawer_results, "metadatas"),
         _first_or_empty(drawer_results, "distances"),
     ):
+        meta = meta or {}
+        doc = doc or ""
         # Filter on raw distance before rounding to avoid precision loss.
         if max_distance > 0.0 and dist > max_distance:
             continue
