@@ -405,6 +405,71 @@ class TestSearchTool:
         result = mcp_server.tool_find_tunnels(wing_a="../project")
         assert "error" in result
 
+    # ── #1084: empty/whitespace filters normalize to None ───────────────
+
+    def test_search_accepts_empty_wing_as_no_filter(self, monkeypatch, config, kg):
+        """Empty-string wing must be treated as 'no filter', not a validation error.
+
+        LLM agents that eagerly fill every declared parameter pass ``""`` to
+        mean "no filter". Regression guard for #1084.
+        """
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        captured = {}
+
+        def _fake_search(query, palace_path, wing, room, n_results, max_distance):
+            captured["wing"] = wing
+            captured["room"] = room
+            return {"results": []}
+
+        monkeypatch.setattr(mcp_server, "search_memories", _fake_search)
+
+        result = mcp_server.tool_search(query="JWT", wing="")
+        assert "error" not in result
+        assert captured["wing"] is None
+
+    def test_search_accepts_whitespace_wing_as_no_filter(self, monkeypatch, config, kg):
+        """Whitespace-only wing collapses to None — same rationale as empty string."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        captured = {}
+
+        def _fake_search(query, palace_path, wing, room, n_results, max_distance):
+            captured["wing"] = wing
+            captured["room"] = room
+            return {"results": []}
+
+        monkeypatch.setattr(mcp_server, "search_memories", _fake_search)
+
+        result = mcp_server.tool_search(query="JWT", wing="   ", room="\t")
+        assert "error" not in result
+        assert captured["wing"] is None
+        assert captured["room"] is None
+
+    def test_list_drawers_accepts_empty_room_as_no_filter(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        """Empty-string room on list_drawers must not raise — regression for #1084."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_list_drawers
+
+        result = tool_list_drawers(wing="", room="")
+        assert "error" not in result
+        assert "drawers" in result
+
+    def test_list_rooms_accepts_empty_wing_as_no_filter(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        """Empty-string wing on list_rooms must not raise — regression for #1084."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_list_rooms
+
+        result = tool_list_rooms(wing="")
+        assert "error" not in result
+        assert result["wing"] == "all"
+
     def test_wal_redacts_sensitive_fields(self, monkeypatch, config, kg, tmp_path):
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace import mcp_server

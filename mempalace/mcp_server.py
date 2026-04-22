@@ -284,8 +284,15 @@ def _get_cached_metadata(col, where=None):
 
 
 def _sanitize_optional_name(value: str = None, field_name: str = "name") -> str:
-    """Validate optional wing/room-style filters."""
+    """Validate optional wing/room-style filters.
+
+    Empty strings and whitespace-only values are normalized to ``None`` so
+    LLM agents that eagerly fill every declared parameter (passing ``""``
+    to indicate "no filter") don't hit validation errors. See #1084.
+    """
     if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
         return None
     return sanitize_name(value, field_name)
 
