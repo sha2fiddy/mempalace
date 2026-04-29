@@ -19,9 +19,12 @@ Usage:
 """
 
 import errno
+import gc
 import os
 import shutil
 import sqlite3
+import sys
+import time
 import uuid
 from collections import defaultdict
 from datetime import datetime
@@ -205,6 +208,29 @@ def collection_write_roundtrip_works(col) -> bool:
         return False
 
 
+def _move_with_windows_retry(src: str, dst: str) -> None:
+    """Rename ``src`` to ``dst``, tolerating briefly-open mmap handles on Windows.
+
+    ChromaDB mmap's HNSW segment files (``data_level0.bin``); on Windows those
+    handles can linger for a beat after Python drops the client reference,
+    causing ``shutil.move`` to fail with ``WinError 32``. Elsewhere this is a
+    single direct call.
+    """
+    if sys.platform != "win32":
+        shutil.move(src, dst)
+        return
+    last_err = None
+    for _ in range(10):
+        try:
+            shutil.move(src, dst)
+            return
+        except PermissionError as err:
+            last_err = err
+            gc.collect()
+            time.sleep(0.2)
+    raise last_err if last_err is not None else RuntimeError("move failed")
+
+
 def migrate(palace_path: str, dry_run: bool = False, confirm: bool = False):
     """Migrate a palace to the currently installed ChromaDB version."""
     from .backends.chroma import ChromaBackend
@@ -317,6 +343,7 @@ def migrate(palace_path: str, dry_run: bool = False, confirm: bool = False):
     # Verify before swapping
     final_count = col.count()
     del col
+    fresh_backend.close()
     del fresh_backend
 
     # Validate schema before swapping
@@ -329,6 +356,11 @@ def migrate(palace_path: str, dry_run: bool = False, confirm: bool = False):
         print("\n  ERROR: Schema validation failed. Aborting.")
         print(f"  Temp palace preserved at: {temp_palace}")
         return False
+
+    # Force chromadb finalizers to run so mmap'd segment files are released.
+    # Windows cannot rename/unlink a file with open handles, so we must fully
+    # drop the fresh_backend's PersistentClient before the swap below.
+    gc.collect()
 
     # Swap: rename old palace aside, then move new one into place.
     # This avoids a window where both old and new are missing.
@@ -346,7 +378,7 @@ def migrate(palace_path: str, dry_run: bool = False, confirm: bool = False):
             _restore_stale_palace(palace_path, stale_path)
             raise
         try:
-            shutil.move(temp_palace, palace_path)
+            _move_with_windows_retry(temp_palace, palace_path)
         except Exception:
             _restore_stale_palace(palace_path, stale_path)
             raise
