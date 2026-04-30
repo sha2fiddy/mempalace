@@ -935,7 +935,34 @@ def cmd_compress(args):
         print("  (dry run -- nothing stored)")
 
 
+def _reconfigure_stdio_utf8_on_windows():
+    """Decode stdio as UTF-8 on Windows for the primary `mempalace` CLI.
+
+    Without this, Python defaults stdio to the system ANSI codepage
+    (cp1252/cp1251/cp950 depending on locale). That mojibakes non-ASCII
+    content piped in (`mempalace search ... < query.txt`) or piped out
+    (`mempalace search "..." > out.txt`) when verbatim drawer text or
+    wing/room names contain non-Latin characters.
+    """
+    if sys.platform != "win32":
+        return
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="strict")
+        except Exception as exc:
+            print(
+                f"WARNING: Could not reconfigure {name} to UTF-8: {exc}",
+                file=sys.stderr,
+            )
+
+
 def main():
+    _reconfigure_stdio_utf8_on_windows()
+
     version_label = f"MemPalace {__version__}"
     parser = argparse.ArgumentParser(
         description="MemPalace — Give your AI a memory. No API key required.",
