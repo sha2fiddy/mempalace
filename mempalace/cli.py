@@ -796,6 +796,23 @@ def cmd_repair(args):
         )
         return
 
+    if getattr(args, "mode", "legacy") == "reconcile":
+        if not getattr(args, "segment", None):
+            print("  --mode reconcile requires --segment <uuid>")
+            return
+        from .repair import reconcile_orphan_sql_rows
+
+        reconcile_orphan_sql_rows(
+            palace_path,
+            segment=args.segment,
+            metadata_segment=getattr(args, "metadata_segment", None),
+            max_elements=getattr(args, "max_elements", None),
+            backup=getattr(args, "backup", True),
+            dry_run=getattr(args, "dry_run", False),
+            assume_yes=getattr(args, "yes", False),
+        )
+        return
+
     if getattr(args, "mode", "legacy") == "from-sqlite":
         from .migrate import confirm_destructive_action
         from .repair import RebuildPartialError, rebuild_from_sqlite
@@ -1460,7 +1477,7 @@ def main():
     )
     p_repair.add_argument(
         "--mode",
-        choices=["legacy", "hnsw", "max-seq-id", "from-sqlite"],
+        choices=["legacy", "hnsw", "max-seq-id", "from-sqlite", "reconcile"],
         default="legacy",
         help=(
             "legacy: full-palace rebuild via the chromadb client (default). "
@@ -1468,7 +1485,8 @@ def main():
             "max-seq-id: un-poison max_seq_id rows corrupted by the legacy 0.6.x shim. "
             "from-sqlite: rebuild by reading rows directly from chroma.sqlite3, "
             "bypassing the chromadb client. Use when legacy mode bails because the "
-            "chromadb client cannot open the collection."
+            "chromadb client cannot open the collection. "
+            "reconcile: re-embed SQL-only orphan rows into the HNSW segment."
         ),
     )
     p_repair.add_argument(
@@ -1492,8 +1510,8 @@ def main():
         "--segment",
         default=None,
         help=(
-            "Segment UUID. Required for --mode hnsw (under <palace>/<uuid>/); "
-            "optional filter for --mode max-seq-id (repairs only that segment)."
+            "Segment UUID. For --mode max-seq-id: repair only that segment (optional filter). "
+            "For --mode hnsw or reconcile: required, points to <palace>/<uuid>/."
         ),
     )
     p_repair.add_argument(
@@ -1502,6 +1520,14 @@ def main():
         help=(
             "Path to a pre-corruption chroma.sqlite3 sidecar (for --mode max-seq-id); "
             "clean values are copied from its max_seq_id table verbatim."
+        ),
+    )
+    p_repair.add_argument(
+        "--metadata-segment",
+        default=None,
+        help=(
+            "METADATA segment UUID for --mode reconcile "
+            "(auto-detected from sibling-segment lookup when omitted)"
         ),
     )
     p_repair.add_argument(
