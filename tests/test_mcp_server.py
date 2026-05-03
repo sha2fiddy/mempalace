@@ -1295,3 +1295,80 @@ class TestKGLazyCache:
         mcp_server.tool_reconnect()
 
         assert mcp_server._kg_by_path == {}
+
+    def test_call_kg_retries_after_concurrent_close(self, monkeypatch):
+        """A KG closed mid-handler must trigger a one-shot retry with a fresh
+        instance — not surface a -32000 to the MCP client."""
+        import sqlite3 as _sqlite3
+
+        from mempalace import mcp_server
+
+        path = "/fake/palace/knowledge_graph.sqlite3"
+        monkeypatch.setattr(mcp_server, "_resolve_kg_path", lambda: path)
+
+        class _ClosedKG:
+            def query_entity(self, entity, **kwargs):
+                raise _sqlite3.ProgrammingError("Cannot operate on a closed database")
+
+        class _FreshKG:
+            def query_entity(self, entity, **kwargs):
+                return [{"entity": entity}]
+
+        cache = {os.path.abspath(path): _ClosedKG()}
+        monkeypatch.setattr(mcp_server, "_kg_by_path", cache)
+
+        # Second _get_kg() call (after the cache eviction) constructs a new
+        # KG. Patch the constructor so we don't open a real sqlite file.
+        monkeypatch.setattr(mcp_server, "KnowledgeGraph", lambda **_: _FreshKG())
+
+        result = mcp_server._call_kg(lambda kg: kg.query_entity("Alice"))
+        assert result == [{"entity": "Alice"}]
+        # The closed instance must be evicted; the fresh one must be cached.
+        assert isinstance(cache[os.path.abspath(path)], _FreshKG)
+
+    def test_call_kg_does_not_retry_on_other_errors(self, monkeypatch):
+        """Non-ProgrammingError exceptions must propagate without retry —
+        we don't want the retry guard masking real bugs."""
+        from mempalace import mcp_server
+
+        path = "/fake/palace/knowledge_graph.sqlite3"
+        monkeypatch.setattr(mcp_server, "_resolve_kg_path", lambda: path)
+
+        calls = {"count": 0}
+
+        class _FailingKG:
+            def query_entity(self, entity, **kwargs):
+                calls["count"] += 1
+                raise ValueError("bad input")
+
+        monkeypatch.setattr(mcp_server, "_kg_by_path", {os.path.abspath(path): _FailingKG()})
+        monkeypatch.setattr(mcp_server, "KnowledgeGraph", lambda **_: _FailingKG())
+
+        with pytest.raises(ValueError, match="bad input"):
+            mcp_server._call_kg(lambda kg: kg.query_entity("Alice"))
+        assert calls["count"] == 1, "non-ProgrammingError must not trigger retry"
+
+    def test_call_kg_gives_up_after_one_retry(self, monkeypatch):
+        """If the second attempt also hits a closed DB, give up rather than
+        loop forever — a sustained close-stream is a different bug."""
+        import sqlite3 as _sqlite3
+
+        from mempalace import mcp_server
+
+        path = "/fake/palace/knowledge_graph.sqlite3"
+        monkeypatch.setattr(mcp_server, "_resolve_kg_path", lambda: path)
+
+        calls = {"count": 0}
+
+        class _AlwaysClosedKG:
+            def query_entity(self, entity, **kwargs):
+                calls["count"] += 1
+                raise _sqlite3.ProgrammingError("closed again")
+
+        cache = {}
+        monkeypatch.setattr(mcp_server, "_kg_by_path", cache)
+        monkeypatch.setattr(mcp_server, "KnowledgeGraph", lambda **_: _AlwaysClosedKG())
+
+        with pytest.raises(_sqlite3.ProgrammingError):
+            mcp_server._call_kg(lambda kg: kg.query_entity("Alice"))
+        assert calls["count"] == 2, "expected exactly one retry beyond the initial attempt"
