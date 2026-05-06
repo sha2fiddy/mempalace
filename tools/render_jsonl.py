@@ -11,9 +11,11 @@ Usage:
 
 Stdlib only. Python 3.9+. Read-only on the input.
 """
+
 import json
 import sys
 from pathlib import Path
+
 
 def extract_text(content):
     if isinstance(content, str):
@@ -27,6 +29,7 @@ def extract_text(content):
                     parts.append(t)
         return "\n".join(parts)
     return ""
+
 
 def main():
     if len(sys.argv) < 2:
@@ -62,7 +65,8 @@ def main():
         f"# Claude Code transcript: {src}",
         f"# Total turns: {len(turns)}",
         f"# Date range : {min(stamps) if stamps else 'n/a'}  ->  {max(stamps) if stamps else 'n/a'}",
-        "#" + "-" * 70, "",
+        "#" + "-" * 70,
+        "",
     ]
     out.write("\n".join(header))
     for ts, role, text in turns:
@@ -70,6 +74,7 @@ def main():
     if out is not sys.stdout:
         out.close()
         print(f"Wrote {len(turns)} turns to {sys.argv[2]}")
+
 
 if __name__ == "__main__":
     main()
