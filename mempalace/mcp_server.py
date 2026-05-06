@@ -1013,6 +1013,13 @@ def tool_list_drawers(wing: str = None, room: str = None, limit: int = 20, offse
             kwargs["where"] = where
         result = col.get(**kwargs)
 
+        # Compute total matching drawers for pagination.
+        if where:
+            total_result = col.get(where=where, include=[])
+            total = len(total_result["ids"])
+        else:
+            total = col.count()
+
         drawers = []
         for i, did in enumerate(result["ids"]):
             meta = result["metadatas"][i]
@@ -1027,6 +1034,7 @@ def tool_list_drawers(wing: str = None, room: str = None, limit: int = 20, offse
             )
         return {
             "drawers": drawers,
+            "total": total,
             "count": len(drawers),
             "offset": offset,
             "limit": limit,
@@ -1817,7 +1825,7 @@ TOOLS = {
         "handler": tool_get_drawer,
     },
     "mempalace_list_drawers": {
-        "description": "List drawers with pagination. Optional wing/room filter. Returns IDs, wings, rooms, and content previews.",
+        "description": "List drawers with pagination. Optional wing/room filter. Returns IDs, wings, rooms, content previews, and total matching count for pagination.",
         "input_schema": {
             "type": "object",
             "properties": {
