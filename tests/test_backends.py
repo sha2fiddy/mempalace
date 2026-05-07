@@ -1,5 +1,6 @@
 import os
 import pickle
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -206,6 +207,52 @@ def test_query_empty_preserves_embeddings_outer_shape_when_requested():
 
     not_requested = collection.query(query_texts=["q1", "q2"], include=["documents"])
     assert not_requested.embeddings is None
+
+
+def test_chroma_close_palace_releases_sqlite_lock_for_reopen(tmp_path):
+    """close_palace must release chromadb's rust-side SQLite file lock so
+    a fresh PersistentClient on the same path after shutil.rmtree can
+    write without hitting SQLITE_READONLY_DBMOVED."""
+    backend = ChromaBackend()
+    palace_path = tmp_path / "palace-a"
+    ref = PalaceRef(id=str(palace_path), local_path=str(palace_path))
+
+    col = backend.get_collection(palace=ref, collection_name="mempalace_drawers", create=True)
+    col.upsert(documents=["hello"], ids=["a"], metadatas=[{"k": "v"}])
+
+    backend.close_palace(ref)
+    shutil.rmtree(palace_path)
+
+    col = backend.get_collection(palace=ref, collection_name="mempalace_drawers", create=True)
+    col.upsert(documents=["world"], ids=["b"], metadatas=[{"k": "v2"}])
+    assert col.count() == 1
+
+
+def test_chroma_close_releases_all_cached_clients(tmp_path):
+    """close() must release every cached client's SQLite file lock so any
+    of their palace paths can be reopened by a fresh backend in the same
+    process."""
+    backend = ChromaBackend()
+    palace_a = tmp_path / "palace-a"
+    palace_b = tmp_path / "palace-b"
+    ref_a = PalaceRef(id=str(palace_a), local_path=str(palace_a))
+    ref_b = PalaceRef(id=str(palace_b), local_path=str(palace_b))
+
+    for ref in (ref_a, ref_b):
+        backend.get_collection(palace=ref, collection_name="mempalace_drawers", create=True).upsert(
+            documents=["x"], ids=["x"], metadatas=[{"k": "v"}]
+        )
+
+    backend.close()
+
+    for path in (palace_a, palace_b):
+        shutil.rmtree(path)
+        ref = PalaceRef(id=str(path), local_path=str(path))
+        fresh = ChromaBackend()
+        col = fresh.get_collection(palace=ref, collection_name="mempalace_drawers", create=True)
+        col.upsert(documents=["y"], ids=["y"], metadatas=[{"k": "v2"}])
+        assert col.count() == 1
+        fresh.close()
 
 
 def test_chroma_cache_invalidates_when_db_file_missing(tmp_path):
@@ -735,9 +782,9 @@ def test_make_client_quarantines_only_on_first_call_per_palace(tmp_path, monkeyp
     ChromaBackend.make_client(palace_path)
     ChromaBackend.make_client(palace_path)
 
-    assert calls == [palace_path], (
-        "quarantine_stale_hnsw should fire once per palace per process, not on every reconnect"
-    )
+    assert calls == [
+        palace_path
+    ], "quarantine_stale_hnsw should fire once per palace per process, not on every reconnect"
 
 
 def test_make_client_gates_invalid_metadata_on_first_call(tmp_path, monkeypatch):
@@ -795,6 +842,67 @@ def test_make_client_quarantines_each_palace_independently(tmp_path, monkeypatch
     ChromaBackend.make_client(palace_b)  # already gated
 
     assert calls == [palace_a, palace_b]
+
+
+# ── _client() cold-start gate (#1121, #1132, #1263) ──────────────────────
+
+
+def test_client_quarantines_corrupt_segment_on_first_open(tmp_path, monkeypatch):
+    """The instance ``_client()`` path must run ``quarantine_stale_hnsw``
+    on first open, mirroring the ``make_client()`` static helper. Before
+    PR #1173's wiring was extended here, CLI mining / search / repair /
+    status all skipped the quarantine pass and would SIGSEGV on a stale
+    HNSW segment (#1121, #1132, #1263)."""
+    now = 1_700_000_000.0
+    palace, seg = _make_palace_with_segment(
+        tmp_path,
+        hnsw_mtime=now - 7200,
+        sqlite_mtime=now,
+        meta_bytes=_CORRUPT_META,
+    )
+
+    monkeypatch.setattr(ChromaBackend, "_quarantined_paths", set())
+
+    backend = ChromaBackend()
+    try:
+        backend._client(str(palace))
+    finally:
+        backend.close()
+
+    assert not seg.exists(), "_client() should have quarantined the corrupt segment"
+    drift_dirs = [p for p in palace.iterdir() if ".drift-" in p.name]
+    assert len(drift_dirs) == 1
+
+
+def test_client_quarantines_only_on_first_call_per_palace(tmp_path, monkeypatch):
+    """Repeated ``_client()`` calls for the same palace re-run quarantine
+    at most once — the ``_quarantined_paths`` gate prevents runtime
+    thrash on hot paths (``_client()`` is hit on every backend op)."""
+    palace_path = str(tmp_path / "palace")
+    os.makedirs(palace_path, exist_ok=True)
+    (Path(palace_path) / "chroma.sqlite3").write_text("")
+
+    monkeypatch.setattr(ChromaBackend, "_quarantined_paths", set())
+
+    calls: list[str] = []
+
+    def _spy(path, stale_seconds=300.0):
+        calls.append(path)
+        return []
+
+    monkeypatch.setattr("mempalace.backends.chroma.quarantine_stale_hnsw", _spy)
+
+    backend = ChromaBackend()
+    try:
+        backend._client(palace_path)
+        backend._client(palace_path)
+        backend._client(palace_path)
+    finally:
+        backend.close()
+
+    assert (
+        calls == [palace_path]
+    ), "quarantine_stale_hnsw should fire once per palace per process from _client(), not on every call"
 
 
 # ── _pin_hnsw_threads (per-process retrofit, separate from this PR's gate) ──
