@@ -1153,6 +1153,77 @@ def test_rebuild_index_aborts_on_sqlite_integrity_errors_before_delete_collectio
     mock_shutil.copy2.assert_not_called()
 
 
+def test_rebuild_index_runs_sqlite_preflight_before_chromadb_open(tmp_path, capsys):
+    """The SQLite integrity preflight must run BEFORE backend.get_collection.
+
+    chromadb's rust binding raises pyo3_runtime.PanicException (which is not
+    a regular Exception subclass) on a malformed page, so any get_collection
+    call against a corrupt SQLite propagates past `except Exception` handlers
+    and produces a 30-line stack trace instead of the friendly abort message.
+    Regression test for the ordering bug where the preflight was placed after
+    the chromadb client open and therefore never reached on the cases it was
+    designed to catch (#1364 follow-up).
+    """
+    palace = tmp_path / "palace"
+    palace.mkdir()
+
+    # Build a real chromadb palace with one drawer so chroma.sqlite3 exists
+    # at full schema size, then mangle several middle pages so PRAGMA
+    # quick_check fails with "disk image is malformed". This matches the
+    # production failure mode users hit in #1362 / #1364.
+    from mempalace.backends.chroma import ChromaBackend
+
+    backend = ChromaBackend()
+    try:
+        col = backend.create_collection(str(palace), "mempalace_drawers")
+        col.upsert(
+            ids=["d1"],
+            documents=["doc"],
+            metadatas=[{"wing": "w", "room": "r"}],
+        )
+    finally:
+        backend.close()
+
+    sqlite_path = palace / "chroma.sqlite3"
+    pre_size = sqlite_path.stat().st_size
+
+    # Compute a page-aligned corruption offset that's always inside the
+    # existing file. SQLite uses 4 KB pages by default; we mangle 4 pages
+    # somewhere in the middle, skipping at least the first 2 pages
+    # (header + root) so the file still opens. Without clamping to the
+    # actual file size, a seek past EOF on r+b mode would silently
+    # extend the file with zero-padding and leave the original pages
+    # intact — quick_check would still pass, and the regression guard
+    # would skip the bug.
+    PAGE = 4096
+    CORRUPT_BYTES = 16384  # 4 pages
+    HEADER_GUARD = PAGE * 2  # leave header + root pages intact
+    assert (
+        pre_size >= HEADER_GUARD + CORRUPT_BYTES
+    ), f"sqlite db too small to mangle without truncating: {pre_size} bytes"
+    # Round (pre_size - CORRUPT_BYTES) down to a page boundary so we
+    # mangle whole pages. Cap at offset 40960 (page 10) for stable
+    # diagnostics across SQLite versions that may grow the file.
+    max_offset = (pre_size - CORRUPT_BYTES) & ~(PAGE - 1)
+    corrupt_offset = min(40960, max_offset)
+    assert corrupt_offset >= HEADER_GUARD, f"corruption offset {corrupt_offset} too close to header"
+
+    with open(sqlite_path, "r+b") as f:
+        f.seek(corrupt_offset)
+        f.write(b"\xde\xad\xbe\xef" * (CORRUPT_BYTES // 4))
+
+    # No chromadb mocks: rebuild_index must reach sqlite_integrity_errors
+    # before any code path that opens a chromadb client. If the preflight
+    # comes too late, the test fails with pyo3_runtime.PanicException
+    # instead of returning cleanly.
+    repair.rebuild_index(palace_path=str(palace))
+
+    out = capsys.readouterr().out
+    assert "SQLite-layer corruption detected before repair rebuild" in out
+    assert "PRAGMA quick_check" in out
+    assert "disk image is malformed" in out
+
+
 def test_max_seq_id_preflight_preserves_embeddings_queue(tmp_path):
     """#1295: default repair preflight must not drop queued writes."""
 
