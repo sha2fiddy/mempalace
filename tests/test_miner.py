@@ -777,7 +777,7 @@ def test_mine_arbitrary_exception_prints_summary_and_reraises(tmp_path, capsys):
 
 
 def test_mine_cleans_up_pid_file_on_interrupt(tmp_path):
-    """Our own PID entry in mine.pid is removed in the finally clause."""
+    """Our own per-target PID slot is removed in the finally clause."""
     import pytest
     from unittest.mock import patch
 
@@ -786,14 +786,16 @@ def test_mine_cleans_up_pid_file_on_interrupt(tmp_path):
     _make_minable_project(project_root, n_files=2)
     palace_path = project_root / "palace"
 
-    pid_file = tmp_path / "mine.pid"
+    pid_file = tmp_path / "mine_abc.pid"
     pid_file.write_text(str(os.getpid()))
 
     def fake_process_file(*args, **kwargs):
         raise KeyboardInterrupt
 
+    # The mine subprocess receives its slot path via env var; the cleanup
+    # hook in miner.py reads that var and removes the slot if it matches.
     with (
-        patch("mempalace.hooks_cli._MINE_PID_FILE", pid_file),
+        patch.dict(os.environ, {"MEMPALACE_MINE_PID_FILE": str(pid_file)}),
         patch("mempalace.miner.process_file", side_effect=fake_process_file),
     ):
         with pytest.raises(SystemExit):
@@ -803,7 +805,7 @@ def test_mine_cleans_up_pid_file_on_interrupt(tmp_path):
 
 
 def test_mine_cleans_up_pid_file_on_clean_exit(tmp_path):
-    """Successful mine also removes its own PID entry in the finally clause."""
+    """Successful mine also removes its own per-target PID slot."""
     from unittest.mock import patch
 
     project_root = tmp_path / "proj"
@@ -811,17 +813,17 @@ def test_mine_cleans_up_pid_file_on_clean_exit(tmp_path):
     _make_minable_project(project_root, n_files=1)
     palace_path = project_root / "palace"
 
-    pid_file = tmp_path / "mine.pid"
+    pid_file = tmp_path / "mine_abc.pid"
     pid_file.write_text(str(os.getpid()))
 
-    with patch("mempalace.hooks_cli._MINE_PID_FILE", pid_file):
+    with patch.dict(os.environ, {"MEMPALACE_MINE_PID_FILE": str(pid_file)}):
         mine(str(project_root), str(palace_path))
 
     assert not pid_file.exists()
 
 
 def test_mine_does_not_remove_other_processes_pid_file(tmp_path):
-    """A PID file pointing at someone else's PID is left untouched."""
+    """A PID slot pointing at someone else's PID is left untouched."""
     from unittest.mock import patch
 
     project_root = tmp_path / "proj"
@@ -830,10 +832,10 @@ def test_mine_does_not_remove_other_processes_pid_file(tmp_path):
     palace_path = project_root / "palace"
 
     other_pid = os.getpid() + 999_999  # a PID that isn't us
-    pid_file = tmp_path / "mine.pid"
+    pid_file = tmp_path / "mine_abc.pid"
     pid_file.write_text(str(other_pid))
 
-    with patch("mempalace.hooks_cli._MINE_PID_FILE", pid_file):
+    with patch.dict(os.environ, {"MEMPALACE_MINE_PID_FILE": str(pid_file)}):
         mine(str(project_root), str(palace_path))
 
     assert pid_file.exists(), "Foreign PID entries must not be removed"

@@ -1206,30 +1206,29 @@ def _mine_impl(
 
 
 def _cleanup_mine_pid_file() -> None:
-    """Remove the global mine PID file if it currently points at us.
+    """Remove this process's per-target PID slot on exit.
 
-    The PID file (``~/.mempalace/hook_state/mine.pid``, written by the
-    hook in :func:`mempalace.hooks_cli._spawn_mine`) tracks the PID of
-    the most recently spawned mine subprocess so the hook can dedup
-    concurrent auto-ingest fires. When that subprocess exits — cleanly,
-    on error, or via Ctrl-C — it should remove its own entry so the
-    next hook fire isn't briefly fooled by a stale PID before
-    ``_pid_alive`` returns False.
+    Hook-spawned mines receive ``MEMPALACE_MINE_PID_FILE`` in their env
+    pointing at the slot the hook claimed for them
+    (``~/.mempalace/hook_state/mine_pids/mine_<sha>.pid``). When the
+    subprocess exits — cleanly, on error, or via Ctrl-C — it removes its
+    own slot so the next hook fire isn't briefly fooled by a stale PID
+    before ``_pid_alive`` returns False.
 
-    We only delete the file if it claims our own PID; any other PID is
-    left alone (could be an unrelated mine running concurrently from
-    a different worktree / session).
+    Only delete the slot if it claims our own PID; any other PID is left
+    alone (it could belong to an unrelated mine that just claimed the
+    same slot via a stale-reclaim race).
     """
-    try:
-        from .hooks_cli import _MINE_PID_FILE
-    except Exception:
+    pid_file_env = os.environ.get("MEMPALACE_MINE_PID_FILE", "")
+    if not pid_file_env:
         return
     try:
-        if not _MINE_PID_FILE.exists():
+        pid_file = Path(pid_file_env)
+        if not pid_file.exists():
             return
-        recorded = _MINE_PID_FILE.read_text().strip()
+        recorded = pid_file.read_text().strip()
         if recorded and recorded.isdigit() and int(recorded) == os.getpid():
-            _MINE_PID_FILE.unlink()
+            pid_file.unlink()
     except OSError:
         # Best-effort cleanup; never fail the mine over PID bookkeeping.
         pass
