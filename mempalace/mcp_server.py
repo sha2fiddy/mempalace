@@ -168,6 +168,46 @@ _collection_cache = None
 _palace_db_inode = 0  # inode of chroma.sqlite3 at cache time
 _palace_db_mtime = 0.0  # mtime of chroma.sqlite3 at cache time
 
+
+def _is_transient_index_error(result) -> bool:
+    # Chroma can return "Internal error: Error finding id" during the
+    # HNSW flush window after a bulk CLI mine — SQLite rows are
+    # committed but the binary segment metadata isn't flushed yet.
+    # Self-heals once the flush completes (~30-60s). See issue #1315.
+    if not isinstance(result, dict):
+        return False
+    err = result.get("error", "")
+    return isinstance(err, str) and ("Error finding id" in err or "Internal error" in err)
+
+
+def _force_chroma_cache_reset() -> None:
+    # Drop both the MCP-local client cache and the shared backend's
+    # per-palace cache so the next call rebuilds against the post-flush
+    # state. Without clearing _DEFAULT_BACKEND._clients the retry
+    # would just hit the same stale handle, since tool_search routes
+    # via search_memories -> palace.get_collection -> backend cache.
+    global \
+        _client_cache, \
+        _collection_cache, \
+        _palace_db_inode, \
+        _palace_db_mtime, \
+        _metadata_cache, \
+        _metadata_cache_time
+    _client_cache = None
+    _collection_cache = None
+    _palace_db_inode = 0
+    _palace_db_mtime = 0.0
+    _metadata_cache = None
+    _metadata_cache_time = 0
+    try:
+        from .palace import _DEFAULT_BACKEND
+
+        _DEFAULT_BACKEND._clients.pop(_config.palace_path, None)
+        _DEFAULT_BACKEND._freshness.pop(_config.palace_path, None)
+    except Exception:
+        pass
+
+
 # ── Vector-search disabled flag (#1222) ──────────────────────────────────
 # Set when ``hnsw_capacity_status`` reports a divergence between sqlite
 # and the HNSW segment large enough that chromadb would segfault on
@@ -724,6 +764,24 @@ def tool_search(
         vector_disabled=_vector_disabled,
         collection_name=_config.collection_name,
     )
+    if _is_transient_index_error(result):
+        # Post-bulk-write HNSW flush window (#1315): drop caches, give
+        # the segment a moment to settle, retry once. Caller never sees
+        # the transient unless the second attempt also fails.
+        _force_chroma_cache_reset()
+        time.sleep(2)
+        _refresh_vector_disabled_flag()
+        result = search_memories(
+            sanitized["clean_query"],
+            palace_path=_config.palace_path,
+            wing=wing,
+            room=room,
+            n_results=limit,
+            max_distance=dist,
+            vector_disabled=_vector_disabled,
+        )
+        if not _is_transient_index_error(result):
+            result["index_recovered"] = True
     if _vector_disabled:
         result["vector_disabled"] = True
         result["vector_disabled_reason"] = _vector_disabled_reason
