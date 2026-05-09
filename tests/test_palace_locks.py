@@ -23,15 +23,17 @@ from mempalace.palace import (
 
 
 def _get_mp_context():
-    """Pick a start method that works on every CI runner.
+    """Always use ``spawn`` — ``fork`` deadlocks under modern Python.
 
-    `fork` is cheaper (no re-import) but is unavailable on Windows, so we fall
-    back to `spawn` there. `spawn` inherits ``os.environ`` (including the
-    monkeypatched ``HOME``) and re-imports the ``mempalace`` package in the
-    child, which is sufficient for the lock-file semantics exercised here.
+    The parent (pytest + chromadb + onnxruntime) is multi-threaded by the time
+    these tests run. ``fork`` snapshots that state into the child without the
+    threads that hold the locks, which Python 3.13 explicitly warns about and
+    which deadlocks the CI runners. macOS additionally forbids
+    fork-without-exec via CoreFoundation. ``spawn`` re-imports the package in
+    the child (slower, but safe) and inherits ``os.environ`` — including the
+    monkeypatched ``HOME`` — which is all these lock-file tests need.
     """
-    start_method = "spawn" if os.name == "nt" else "fork"
-    return multiprocessing.get_context(start_method)
+    return multiprocessing.get_context("spawn")
 
 
 # ---------------------------------------------------------------------------
