@@ -1,6 +1,16 @@
 """MemPalace — Give your AI a memory. No API key required."""
 
 import logging
+import os
+
+
+def _strip_leaked_pythonpath() -> None:
+    # Venvs inherit PYTHONPATH; on multi-Python systems it can load
+    # compiled extensions with the wrong ABI and crash on import.
+    os.environ.pop("PYTHONPATH", None)
+
+
+_strip_leaked_pythonpath()
 
 from .version import __version__  # noqa: E402
 
