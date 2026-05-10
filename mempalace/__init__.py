@@ -2,12 +2,20 @@
 
 import logging
 import os
+import sys
 
 
 def _strip_leaked_pythonpath() -> None:
-    # Venvs inherit PYTHONPATH; on multi-Python systems it can load
-    # compiled extensions with the wrong ABI and crash on import.
-    os.environ.pop("PYTHONPATH", None)
+    # Venvs inherit PYTHONPATH; on multi-Python systems it can cause
+    # transitive imports to load compiled extensions (pydantic_core,
+    # chromadb_rust_bindings) from the wrong ABI. Drop the env var
+    # and remove the sys.path entries the interpreter populated from
+    # it before the consumer imports anything that ships compiled code.
+    leaked = os.environ.pop("PYTHONPATH", None)
+    if not leaked:
+        return
+    leaked_entries = {p for p in leaked.split(os.pathsep) if p}
+    sys.path[:] = [p for p in sys.path if p not in leaked_entries]
 
 
 _strip_leaked_pythonpath()
