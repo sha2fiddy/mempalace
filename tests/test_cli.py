@@ -38,26 +38,35 @@ def test_cli_main_strips_leaked_pythonpath_from_env():
     sys.path-filter test in test_init.py but for the env half of the
     split fix. See #1423.
 
-    Asserts ENV_MID between import and main() to prove that main() is
-    the strip site, not the package import. If a regression moves the
-    env pop back into __init__.py, ENV_MID would change and this test
-    would fail."""
+    Three assertions cover the full split contract:
+    - ENV_MID (after import, before main) is preserved verbatim:
+      regression detector for someone moving the env pop back into
+      __init__.py.
+    - SENTINEL_IN_PATH is False at import time: package-level sys.path
+      filter half of the split actually ran.
+    - ENV_AFTER (after main) is None: CLI entry-point env strip ran.
+
+    SystemExit is caught with a narrowed exit-code check so a future
+    argparse change that exits with a non-zero code (e.g. usage error)
+    surfaces as a test failure instead of being swallowed."""
     expected_env = f"{_LEAK_PREFIX}/a{os.pathsep}{_LEAK_PREFIX}/b"
     env = os.environ.copy()
     env["PYTHONPATH"] = expected_env
     # Run main() with --version so it exits cleanly without entering any
-    # subcommand. argparse raises SystemExit on --version; the wrapper
-    # catches it and prints the post-main PYTHONPATH so the assertion
-    # is observable.
+    # subcommand. argparse raises SystemExit(0) on --version; the wrapper
+    # asserts the exit code is clean and prints the post-main PYTHONPATH
+    # so the assertion is observable.
     code = (
         "import os, sys\n"
         "from mempalace.cli import main\n"
+        f"prefix = {_LEAK_PREFIX!r}\n"
         "print('ENV_MID:', repr(os.environ.get('PYTHONPATH')))\n"
+        "print('SENTINEL_IN_PATH:', any(prefix in (p or '') for p in sys.path))\n"
         "sys.argv = ['mempalace', '--version']\n"
         "try:\n"
         "    main()\n"
-        "except SystemExit:\n"
-        "    pass\n"
+        "except SystemExit as exc:\n"
+        "    assert exc.code in (0, None), f'unexpected exit code: {exc.code!r}'\n"
         "print('ENV_AFTER:', repr(os.environ.get('PYTHONPATH')))\n"
     )
     result = subprocess.run(
@@ -73,6 +82,9 @@ def test_cli_main_strips_leaked_pythonpath_from_env():
     assert (
         f"ENV_MID: {expected_env!r}" in result.stdout
     ), f"package import unexpectedly stripped env (regression in __init__.py): {diag}"
+    assert (
+        "SENTINEL_IN_PATH: False" in result.stdout
+    ), f"package import did not filter sys.path (regression in __init__.py): {diag}"
     assert "ENV_AFTER: None" in result.stdout, f"CLI did not strip PYTHONPATH: {diag}"
 
 

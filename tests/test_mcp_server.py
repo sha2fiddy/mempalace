@@ -28,20 +28,27 @@ def test_mcp_main_strips_leaked_pythonpath_from_env():
     sys.path-filter test in test_init.py but for the env half of the
     split fix. See #1423.
 
-    Asserts ENV_MID between import and main() to prove main() is the
-    strip site (not __init__.py). The main loop reads JSON-RPC lines
-    from stdin until EOF; closing stdin makes readline() return '' and
-    exits the loop cleanly, which lets us observe the post-main env
-    state."""
+    Three assertions cover the full split contract:
+    - ENV_MID (after import, before main) is preserved verbatim:
+      regression detector for someone moving the env pop back into
+      __init__.py.
+    - SENTINEL_IN_PATH is False at import time: package-level sys.path
+      filter half of the split actually ran.
+    - ENV_AFTER (after main) is None: MCP entry-point env strip ran.
+
+    The main loop reads JSON-RPC lines from stdin until EOF; closing
+    stdin makes readline() return '' and exits the loop cleanly, which
+    lets us observe the post-main env state. Probes go to stderr because
+    mcp_server redirects stdout at import time for clean JSON-RPC."""
     expected_env = f"{_MCP_LEAK_PREFIX}/a{os.pathsep}{_MCP_LEAK_PREFIX}/b"
     env = os.environ.copy()
     env["PYTHONPATH"] = expected_env
     code = (
         "import os, sys\n"
         "from mempalace.mcp_server import main\n"
-        # mcp_server redirects stdout at import time for clean JSON-RPC;
-        # write the probe to stderr so the subprocess can observe it.
+        f"prefix = {_MCP_LEAK_PREFIX!r}\n"
         "sys.stderr.write('ENV_MID: ' + repr(os.environ.get('PYTHONPATH')) + '\\n')\n"
+        "sys.stderr.write('SENTINEL_IN_PATH: ' + repr(any(prefix in (p or '') for p in sys.path)) + '\\n')\n"
         "main()\n"
         "sys.stderr.write('ENV_AFTER: ' + repr(os.environ.get('PYTHONPATH')) + '\\n')\n"
     )
@@ -59,6 +66,9 @@ def test_mcp_main_strips_leaked_pythonpath_from_env():
     assert (
         f"ENV_MID: {expected_env!r}" in result.stderr
     ), f"package import unexpectedly stripped env (regression in __init__.py): {diag}"
+    assert (
+        "SENTINEL_IN_PATH: False" in result.stderr
+    ), f"package import did not filter sys.path (regression in __init__.py): {diag}"
     assert "ENV_AFTER: None" in result.stderr, f"MCP server did not strip PYTHONPATH: {diag}"
 
 

@@ -1129,6 +1129,15 @@ def _reconfigure_stdio_utf8_on_windows():
 
 
 def main():
+    """CLI entry point for the ``mempalace`` console script.
+
+    Side effect: pops ``PYTHONPATH`` from ``os.environ`` (see #1423) so
+    any subprocess this CLI spawns inherits a clean env. Host applications
+    that call ``main()`` programmatically should be aware that the parent
+    process loses ``PYTHONPATH`` as well. Library imports
+    (``import mempalace.searcher`` from a host app) do NOT trigger this
+    side effect; only the CLI/MCP entry points pop the env var.
+    """
     # Drop leaked PYTHONPATH so any subprocess the CLI spawns (mine workers,
     # repair tooling) starts with a clean env. The sys.path filter in
     # mempalace/__init__.py already protects this process from the same
