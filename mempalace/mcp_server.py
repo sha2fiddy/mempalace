@@ -2156,6 +2156,15 @@ SUPPORTED_PROTOCOL_VERSIONS = [
 ]
 
 
+def _internal_tool_error(req_id, tool_name: str) -> dict:
+    logger.exception(f"Tool error in {tool_name}")
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {"code": -32000, "message": "Internal tool error"},
+    }
+
+
 def handle_request(request):
     if not isinstance(request, dict):
         return {
@@ -2290,19 +2299,9 @@ def handle_request(request):
                             "message": f"Missing required {word} {quoted} for tool {tool_name}",
                         },
                     }
-            logger.exception(f"Tool error in {tool_name}")
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {"code": -32000, "message": "Internal tool error"},
-            }
+            return _internal_tool_error(req_id, tool_name)
         except Exception:
-            logger.exception(f"Tool error in {tool_name}")
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {"code": -32000, "message": "Internal tool error"},
-            }
+            return _internal_tool_error(req_id, tool_name)
 
     # Notifications (missing id) must never get a response
     if req_id is None:
