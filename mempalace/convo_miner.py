@@ -439,10 +439,13 @@ def mine_convos(
     palace_config = MempalaceConfig()
     cfg_chunk_size = palace_config.chunk_size
     # Only override convo_miner's MIN_CHUNK_SIZE when the user has set
-    # min_chunk_size explicitly — default MempalaceConfig returns miner.py's
-    # 50, which would drop legitimate short conversation exchanges.
-    raw_min = palace_config._file_config.get("min_chunk_size")
-    cfg_min_chunk_size = raw_min if raw_min is not None else MIN_CHUNK_SIZE
+    # min_chunk_size explicitly. min_chunk_size_explicit returns the
+    # validated value or None — None keeps convo's stricter 30-char
+    # floor. Using the validated accessor (not raw _file_config) means a
+    # garbage/negative/bool config value can't TypeError the length gate
+    # below or ValueError out of chunk_exchanges and abort convo ingest.
+    explicit_min = palace_config.min_chunk_size_explicit
+    cfg_min_chunk_size = explicit_min if explicit_min is not None else MIN_CHUNK_SIZE
 
     convo_path = Path(convo_dir).expanduser().resolve()
     if not wing:

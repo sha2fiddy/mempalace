@@ -443,6 +443,71 @@ def test_chunk_config_min_chunk_size_above_size_repaired(tmp_path):
     assert cfg2.min_chunk_size == 20  # default (50) > chunk_size, clamp
 
 
+# ── min_chunk_size_explicit (convo-path validated accessor) ────────────
+# Backs the #1024-review fix: convo_miner must distinguish "user tuned
+# min_chunk_size" from "untuned" WITHOUT reaching into raw _file_config.
+# Untuned/unusable → None (convo keeps its 30 floor). Usable → validated
+# int. A bad key must never reach the convo length-gate / chunk_exchanges
+# as a non-int and crash ingest.
+
+
+def test_min_chunk_size_explicit_none_when_unset(tmp_path):
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+    assert cfg.min_chunk_size_explicit is None
+
+
+def test_min_chunk_size_explicit_none_when_json_null(tmp_path):
+    """Explicit JSON ``null`` is treated as untuned (preserves the prior
+    ``_file_config.get(...) is None`` sentinel semantics)."""
+    cfg = _write_config(tmp_path, min_chunk_size=None)
+    assert cfg.min_chunk_size_explicit is None
+
+
+def test_min_chunk_size_explicit_returns_validated_value(tmp_path):
+    cfg = _write_config(tmp_path, min_chunk_size=80)
+    assert cfg.min_chunk_size_explicit == 80
+
+
+def test_min_chunk_size_explicit_coerces_numeric_string(tmp_path):
+    cfg = _write_config(tmp_path, min_chunk_size="42")
+    assert cfg.min_chunk_size_explicit == 42
+
+
+@pytest.mark.parametrize("bad", ["abc", -5, True, "", "  "])
+def test_min_chunk_size_explicit_none_on_unusable_value(tmp_path, bad):
+    """Garbage / negative / bool / blank → None, NOT a crash and NOT the
+    miner.py default. convo_miner then falls back to its own 30 floor.
+    This is the exact class of value that used to TypeError the convo
+    length-gate or ValueError out of chunk_exchanges."""
+    cfg = _write_config(tmp_path, min_chunk_size=bad)
+    assert cfg.min_chunk_size_explicit is None
+
+
+def test_min_chunk_size_explicit_none_when_above_chunk_size(tmp_path):
+    """min_chunk_size > chunk_size would zero out ingest — treat as
+    unusable so convo falls back to its floor instead."""
+    cfg = _write_config(tmp_path, chunk_size=100, min_chunk_size=500)
+    assert cfg.min_chunk_size_explicit is None
+
+
+def test_convo_min_chunk_fallback_is_always_safe_int(tmp_path):
+    """Regression for #1024 review: the convo_miner fallback expression
+    must yield a usable int for ANY config — never a str/bool/negative
+    that would crash the length gate or chunk_exchanges."""
+    from mempalace.convo_miner import MIN_CHUNK_SIZE
+
+    for bad in ("not-a-number", -10, True, {}, []):
+        cfg = _write_config(tmp_path, min_chunk_size=bad)
+        explicit = cfg.min_chunk_size_explicit
+        effective = explicit if explicit is not None else MIN_CHUNK_SIZE
+        assert isinstance(effective, int) and not isinstance(effective, bool)
+        assert effective == MIN_CHUNK_SIZE  # untuned floor, no crash
+
+    cfg = _write_config(tmp_path, min_chunk_size=15)
+    explicit = cfg.min_chunk_size_explicit
+    assert (explicit if explicit is not None else MIN_CHUNK_SIZE) == 15
+
+
 def test_chunk_text_rejects_non_positive_chunk_size():
     """Direct callers (tests, library users) that pass ``chunk_size <= 0``
     must hit a clear ValueError, not loop forever."""

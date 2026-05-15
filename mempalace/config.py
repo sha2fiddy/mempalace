@@ -313,6 +313,31 @@ class MempalaceConfig:
         """Mapping of hall names to keyword lists."""
         return self._file_config.get("hall_keywords", DEFAULT_HALL_KEYWORDS)
 
+    @staticmethod
+    def _try_coerce_int(value, minimum=None):
+        """Coerce a raw config value to int, or ``None`` if it cannot be a
+        valid setting.
+
+        bool, empty/garbage string, non-numeric, and below-``minimum``
+        values all return ``None``. Shared by ``_coerce_config_int``
+        (which substitutes a documented default) and
+        ``min_chunk_size_explicit`` (which must distinguish "unusable"
+        from "explicitly set" without crashing the convo path).
+        """
+        if isinstance(value, bool):
+            return None
+        try:
+            if isinstance(value, str):
+                value = value.strip()
+                if not value:
+                    return None
+            value = int(value)
+        except (TypeError, ValueError):
+            return None
+        if minimum is not None and value < minimum:
+            return None
+        return value
+
     def _coerce_config_int(self, key: str, default: int, minimum=None) -> int:
         """Read an int config value, falling back to ``default`` on bad input.
 
@@ -321,20 +346,8 @@ class MempalaceConfig:
         should crash mining or hang ``chunk_text()`` — fall back silently
         to the documented default rather than letting a typo break ingest.
         """
-        value = self._file_config.get(key, default)
-        if isinstance(value, bool):
-            return default
-        try:
-            if isinstance(value, str):
-                value = value.strip()
-                if not value:
-                    return default
-            value = int(value)
-        except (TypeError, ValueError):
-            return default
-        if minimum is not None and value < minimum:
-            return default
-        return value
+        coerced = self._try_coerce_int(self._file_config.get(key, default), minimum)
+        return default if coerced is None else coerced
 
     def _validated_chunk_config(self):
         """Return ``(chunk_size, chunk_overlap, min_chunk_size)`` post-validation.
@@ -382,6 +395,26 @@ class MempalaceConfig:
     def min_chunk_size(self) -> int:
         """Minimum chunk size — skip smaller chunks (validated, ``<= chunk_size``)."""
         return self._validated_chunk_config()[2]
+
+    @property
+    def min_chunk_size_explicit(self):
+        """Validated ``min_chunk_size`` iff the user explicitly set it.
+
+        Returns the coerced int when ``config.json`` defines a usable
+        ``min_chunk_size`` (``>= 0`` and ``<= chunk_size``); ``None`` when
+        the key is absent/null or the value is unusable. ``convo_miner``
+        relies on the ``None`` sentinel to keep its stricter 30-char floor
+        for untuned users while still honoring an explicit override —
+        replacing the raw, unvalidated ``_file_config`` reach that crashed
+        convo ingest on a bad key (#1024 review).
+        """
+        raw = self._file_config.get("min_chunk_size")
+        if raw is None:
+            return None
+        coerced = self._try_coerce_int(raw, minimum=0)
+        if coerced is None or coerced > self.chunk_size:
+            return None
+        return coerced
 
     @property
     def entity_languages(self):
