@@ -960,7 +960,12 @@ def scan_project(
     respect_gitignore: bool = True,
     include_ignored: list = None,
 ) -> list:
-    """Return list of all readable file paths."""
+    """Return list of all readable file paths under ``project_dir``.
+
+    Skips symlinks and oversized files. Each skipped symlink is logged to
+    ``sys.stderr`` with a ``  SKIP: <relative-path> (symlink)`` line so the
+    caller can tell why a directory looks empty after walking.
+    """
     project_path = Path(project_dir).expanduser().resolve()
     files = []
     active_matchers = []
@@ -1008,6 +1013,11 @@ def scan_project(
                     continue
             # Skip symlinks — prevents following links to /dev/urandom, etc.
             if filepath.is_symlink():
+                rel = filepath.relative_to(project_path).as_posix()
+                try:
+                    print(f"  SKIP: {rel} (symlink)", file=sys.stderr)
+                except OSError:
+                    pass
                 continue
             # Skip files exceeding size limit
             try:

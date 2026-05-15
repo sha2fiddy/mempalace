@@ -284,7 +284,12 @@ def detect_convo_room(content: str) -> str:
 
 
 def scan_convos(convo_dir: str) -> list:
-    """Find all potential conversation files."""
+    """Find all potential conversation files.
+
+    Skips symlinks and oversized files. Each skipped symlink is logged to
+    ``sys.stderr`` with a ``  SKIP: <relative-path> (symlink)`` line so the
+    caller can tell why an apparent conversation directory yielded no files.
+    """
     convo_path = Path(convo_dir).expanduser().resolve()
     files = []
     for root, dirs, filenames in os.walk(convo_path):
@@ -296,6 +301,11 @@ def scan_convos(convo_dir: str) -> list:
             if filepath.suffix.lower() in CONVO_EXTENSIONS:
                 # Skip symlinks and oversized files
                 if filepath.is_symlink():
+                    rel = filepath.relative_to(convo_path).as_posix()
+                    try:
+                        print(f"  SKIP: {rel} (symlink)", file=sys.stderr)
+                    except OSError:
+                        pass
                     continue
                 try:
                     if filepath.stat().st_size > MAX_FILE_SIZE:

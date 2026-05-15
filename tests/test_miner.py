@@ -1,10 +1,12 @@
 import os
 import shlex
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
 import chromadb
+import pytest
 import yaml
 
 from mempalace.miner import detect_room, load_config, mine, scan_project, status
@@ -251,6 +253,74 @@ def test_scan_project_skip_dirs_still_apply_without_override():
         assert scanned_files(project_root, respect_gitignore=False) == ["main.py"]
     finally:
         shutil.rmtree(tmpdir)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="symlink creation requires elevated privileges on Windows",
+)
+def test_scan_project_logs_skipped_symlinks(tmp_path, capsys):
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    real_target = tmp_path / "outside" / "real.md"
+    write_file(real_target, "real content\n" * 5)
+    (project_root / "link.md").symlink_to(real_target)
+    write_file(project_root / "regular.md", "regular content\n" * 5)
+
+    files = scanned_files(project_root, respect_gitignore=False)
+
+    assert "link.md" not in files
+    assert "regular.md" in files
+    err = capsys.readouterr().err
+    assert err.count("SKIP:") == 1
+    assert "  SKIP:" in err
+    assert "link.md" in err
+    assert "(symlink)" in err
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="symlink creation requires elevated privileges on Windows",
+)
+def test_scan_project_logs_dangling_symlink(tmp_path, capsys):
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    real_target = tmp_path / "outside" / "ghost.md"
+    real_target.parent.mkdir()
+    real_target.touch()
+    (project_root / "dangling.md").symlink_to(real_target)
+    real_target.unlink()  # target deleted, link dangles
+
+    files = scanned_files(project_root, respect_gitignore=False)
+
+    assert files == []
+    err = capsys.readouterr().err
+    assert err.count("SKIP:") == 1
+    assert "dangling.md" in err
+    assert "(symlink)" in err
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="symlink creation requires elevated privileges on Windows",
+)
+def test_scan_project_logs_nested_symlink_with_relative_path(tmp_path, capsys):
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    real_target = tmp_path / "outside" / "real.md"
+    write_file(real_target, "real content\n" * 5)
+    deep = project_root / "deep" / "subdir"
+    deep.mkdir(parents=True)
+    (deep / "nested.md").symlink_to(real_target)
+
+    files = scanned_files(project_root, respect_gitignore=False)
+
+    assert files == []
+    err = capsys.readouterr().err
+    # Forward slash even on Windows (as_posix) and full relative path,
+    # not just the leaf — proves relative_to(project_path) over .name.
+    assert "deep/subdir/nested.md" in err
+    assert "(symlink)" in err
 
 
 def test_entity_metadata_finds_cyrillic_names(monkeypatch):
