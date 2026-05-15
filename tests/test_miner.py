@@ -493,7 +493,7 @@ def test_process_file_uses_bounded_upsert_batches(tmp_path, monkeypatch):
     chunks = [{"content": f"chunk {i} " * 20, "chunk_index": i} for i in range(5)]
     col = FakeCol()
     monkeypatch.setattr(miner, "DRAWER_UPSERT_BATCH_SIZE", 2)
-    monkeypatch.setattr(miner, "chunk_text", lambda content, source_file: chunks)
+    monkeypatch.setattr(miner, "chunk_text", lambda content, source_file, **kwargs: chunks)
     monkeypatch.setattr(miner, "detect_hall", lambda content: "code")
     monkeypatch.setattr(miner, "_extract_entities_for_metadata", lambda content: "")
 
@@ -889,7 +889,7 @@ def test_process_file_skips_when_chunks_exceed_max(tmp_path, monkeypatch):
 
     monkeypatch.setattr(miner, "MAX_CHUNKS_PER_FILE", 5)
     over_cap = [{"content": f"chunk {i}", "chunk_index": i} for i in range(7)]
-    monkeypatch.setattr(miner, "chunk_text", lambda content, source_file: over_cap)
+    monkeypatch.setattr(miner, "chunk_text", lambda content, source_file, **kwargs: over_cap)
 
     source = tmp_path / "huge.csv"
     source.write_text("col1,col2\n" + "x,y\n" * 500, encoding="utf-8")
