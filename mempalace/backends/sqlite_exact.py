@@ -246,11 +246,36 @@ def _validate_write_batch(
         raise ValueError(f"embeddings length {len(embeddings)} does not match ids length {n}")
 
 
+class _MatrixCache:
+    """In-process cache of one collection's L2-normalized vector matrix.
+
+    Holds the ``(N, D)`` float32 matrix plus the parallel id list and an
+    id→row index — never the documents or metadata, so resident memory
+    stays bounded (~1 GB at 688k × 384). Validity is checked per query
+    with two cheap integers: ``data_version`` (``PRAGMA data_version``,
+    which changes when *another* connection commits) and ``total_changes``
+    (``Connection.total_changes``, which changes when *this* connection
+    writes). Either one moving rebuilds the matrix.
+    """
+
+    __slots__ = ("matrix", "ids", "id_to_row", "dim", "data_version", "total_changes")
+
+    def __init__(self, *, matrix, ids, id_to_row, dim, data_version, total_changes):
+        self.matrix = matrix
+        self.ids = ids
+        self.id_to_row = id_to_row
+        self.dim = dim
+        self.data_version = data_version
+        self.total_changes = total_changes
+
+
 class _SQLiteExactHandle:
     def __init__(self, conn: sqlite3.Connection, lock: threading.RLock):
         self.conn = conn
         self.lock = lock
         self.closed = False
+        # Per-collection cached vector matrices for fast query(); see _MatrixCache.
+        self.matrix_cache: dict[str, _MatrixCache] = {}
 
 
 class SQLiteExactCollection(BaseCollection):
@@ -558,18 +583,43 @@ class SQLiteExactCollection(BaseCollection):
         if not query_embeddings:
             raise ValueError("query input must be a non-empty list")
 
+        _validate_where(where)
+        _validate_where(where_document)
         spec = _IncludeSpec.resolve(include, default_distances=True)
+
+        # Build/refresh the cached normalized-vector matrix and resolve the
+        # candidate row set (all rows, or the subset matching the filters)
+        # under the handle lock, then score with a single matmul outside the
+        # lock so concurrent queries don't serialize on the matmul.
+        with self._cursor() as cur:
+            collection_id = self._collection_id(cur)
+            expected_dim = self._collection_dimension(cur, collection_id)
+            cache = self._refresh_matrix_cache(cur, collection_id)
+            if where is None and where_document is None:
+                candidate_rows = None  # None == all rows
+            else:
+                matched = self._filtered_row_ids(cur, collection_id, where, where_document)
+                # Sort by row index so ties break by rowid, matching the old
+                # ORDER BY rowid scan; also keeps results deterministic.
+                idx = sorted(cache.id_to_row[i] for i in matched if i in cache.id_to_row)
+                candidate_rows = np.asarray(idx, dtype=np.int64)
+
+        matrix = cache.matrix
+        if candidate_rows is None:
+            sub = matrix
+            sub_ids = cache.ids
+        elif candidate_rows.size == 0:
+            sub = matrix[:0]
+            sub_ids = []
+        else:
+            sub = matrix[candidate_rows]
+            sub_ids = [cache.ids[i] for i in candidate_rows]
+
         outer_ids: list[list[str]] = []
         outer_docs: list[list[str]] = []
         outer_metas: list[list[dict]] = []
         outer_dists: list[list[float]] = []
         outer_embeds: list[list[list[float]]] = []
-
-        with self._cursor() as cur:
-            collection_id = self._collection_id(cur)
-            expected_dim = self._collection_dimension(cur, collection_id)
-            rows = self._rows(cur, where=where, where_document=where_document)
-            row_vectors = [(row, _decode_array(row["embedding"])) for row in rows]
 
         for query_vector in query_embeddings:
             q = _as_vector_array(query_vector)
@@ -578,24 +628,46 @@ class SQLiteExactCollection(BaseCollection):
                     f"sqlite_exact collection {self._collection_name!r} expects "
                     f"embedding dimension {expected_dim}, got {int(q.size)}"
                 )
-            q_norm = float(np.linalg.norm(q))
-            scored = []
-            for row, vec in row_vectors:
-                if vec is None or vec.size != q.size:
-                    continue
-                denom = q_norm * float(np.linalg.norm(vec))
-                cos = 0.0 if denom <= 0 else float(np.dot(q, vec) / denom)
-                distance = 1.0 - max(-1.0, min(1.0, cos))
-                scored.append((distance, row, vec))
-            scored.sort(key=lambda item: item[0])
-            top = scored[:n_results]
 
-            outer_ids.append([row["id"] for _, row, _ in top])
-            outer_docs.append([row["document"] for _, row, _ in top] if spec.documents else [])
-            outer_metas.append([row["metadata"] for _, row, _ in top] if spec.metadatas else [])
-            outer_dists.append([float(dist) for dist, _, _ in top] if spec.distances else [])
+            if sub.shape[0] == 0 or sub.shape[1] != q.size:
+                top_ids: list[str] = []
+                top_dists: list[float] = []
+            else:
+                qn = q.astype(np.float32, copy=False)
+                qnorm = float(np.linalg.norm(qn))
+                if qnorm > 0:
+                    qn = qn / qnorm
+                # Cosine similarity: matrix rows and qn are both unit-normalized,
+                # so the dot product is the cosine directly.
+                scores = sub @ qn
+                k = min(n_results, scores.shape[0]) if n_results and n_results > 0 else 0
+                if k <= 0:
+                    order = np.empty(0, dtype=np.int64)
+                elif k >= scores.shape[0]:
+                    order = np.argsort(-scores, kind="stable")
+                else:
+                    part = np.argpartition(-scores, k - 1)[:k]
+                    order = part[np.argsort(-scores[part], kind="stable")]
+                top_ids = [sub_ids[i] for i in order]
+                top_dists = [1.0 - max(-1.0, min(1.0, float(scores[i]))) for i in order]
+
+            # Fetch verbatim documents/metadata/embeddings for the winners only
+            # (n rows) — never held in the cache, so memory stays bounded.
+            rows_by_id = self._fetch_rows_by_id(top_ids, want_embeddings=spec.embeddings)
+            empty = {"document": "", "metadata": {}, "embedding": []}
+
+            outer_ids.append(top_ids)
+            outer_docs.append(
+                [rows_by_id.get(i, empty)["document"] for i in top_ids] if spec.documents else []
+            )
+            outer_metas.append(
+                [rows_by_id.get(i, empty)["metadata"] for i in top_ids] if spec.metadatas else []
+            )
+            outer_dists.append([float(d) for d in top_dists] if spec.distances else [])
             if spec.embeddings:
-                outer_embeds.append([vec.astype(float).tolist() for _, _, vec in top])
+                outer_embeds.append(
+                    [rows_by_id.get(i, empty).get("embedding", []) for i in top_ids]
+                )
 
         return QueryResult(
             ids=outer_ids,
@@ -604,6 +676,106 @@ class SQLiteExactCollection(BaseCollection):
             distances=outer_dists,
             embeddings=outer_embeds if spec.embeddings else None,
         )
+
+    def _refresh_matrix_cache(self, cur, collection_id: int) -> "_MatrixCache":
+        """Return the collection's cached L2-normalized vector matrix,
+        rebuilding it if this connection has written or another connection
+        has committed since it was last built. Runs under the handle lock
+        (caller holds a ``_cursor``)."""
+        data_version = int(cur.execute("PRAGMA data_version").fetchone()[0])
+        total_changes = int(self._handle.conn.total_changes)
+        cache = self._handle.matrix_cache.get(self._collection_name)
+        if (
+            cache is not None
+            and cache.data_version == data_version
+            and cache.total_changes == total_changes
+        ):
+            return cache
+
+        expected_dim = self._collection_dimension(cur, collection_id)
+        ids: list[str] = []
+        vectors: list[np.ndarray] = []
+        for doc_id, blob in cur.execute(
+            "SELECT id, embedding FROM documents WHERE collection_id = ? ORDER BY rowid",
+            (collection_id,),
+        ):
+            arr = _decode_array(blob)
+            if arr is None:
+                continue
+            if expected_dim is not None and arr.size != expected_dim:
+                continue
+            ids.append(doc_id)
+            vectors.append(arr)
+
+        if vectors:
+            matrix = np.vstack(vectors).astype(np.float32, copy=False)
+            norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+            norms[norms == 0.0] = 1.0
+            matrix = matrix / norms
+            dim = int(matrix.shape[1])
+        else:
+            dim = expected_dim
+            matrix = np.zeros((0, dim or 0), dtype=np.float32)
+
+        cache = _MatrixCache(
+            matrix=matrix,
+            ids=ids,
+            id_to_row={doc_id: i for i, doc_id in enumerate(ids)},
+            dim=dim,
+            data_version=data_version,
+            total_changes=total_changes,
+        )
+        self._handle.matrix_cache[self._collection_name] = cache
+        return cache
+
+    def _filtered_row_ids(self, cur, collection_id: int, where, where_document) -> set[str]:
+        """Return the set of doc ids matching ``where`` / ``where_document``.
+
+        Reads only the columns the filters need (skips the embedding blob,
+        and skips the document text unless ``where_document`` is set), so a
+        wing/room metadata filter never pulls the verbatim text into memory.
+        """
+        need_doc = where_document is not None
+        select_cols = "id, metadata_json, document" if need_doc else "id, metadata_json"
+        matched: set[str] = set()
+        for row in cur.execute(
+            f"SELECT {select_cols} FROM documents WHERE collection_id = ? ORDER BY rowid",
+            (collection_id,),
+        ):
+            meta = _json_loads(row[1])
+            if not _matches_where(meta, where):
+                continue
+            if need_doc and not _matches_where_document(row[2] or "", where_document):
+                continue
+            matched.add(row[0])
+        return matched
+
+    def _fetch_rows_by_id(self, ids: list[str], *, want_embeddings: bool) -> dict:
+        """Fetch verbatim document/metadata (and optionally embedding) for a
+        small set of ids, returned as ``{id: {document, metadata[, embedding]}}``."""
+        if not ids:
+            return {}
+        select_cols = (
+            "id, document, metadata_json, embedding"
+            if want_embeddings
+            else "id, document, metadata_json"
+        )
+        out: dict[str, dict] = {}
+        with self._cursor() as cur:
+            collection_id = self._collection_id(cur)
+            for start in range(0, len(ids), 900):
+                chunk = ids[start : start + 900]
+                placeholders = ",".join("?" for _ in chunk)
+                for row in cur.execute(
+                    f"SELECT {select_cols} FROM documents "
+                    f"WHERE collection_id = ? AND id IN ({placeholders})",
+                    (collection_id, *chunk),
+                ):
+                    entry = {"document": row[1] or "", "metadata": _json_loads(row[2])}
+                    if want_embeddings:
+                        entry["embedding"] = _decode_vector(row[3])
+                    out[row[0]] = entry
+        return out
 
     def get(
         self,
